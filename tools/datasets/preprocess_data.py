@@ -52,13 +52,33 @@ class Encoder(object):
         if self.args.ftfy:
             text = ftfy.fix_text(text)
         ids = {}
+        max_seq_length = self.args.max_seq_length
+
         for key in self.args.jsonl_keys:
             doc_ids = []
             text_ids = Encoder.tokenizer.tokenize(text)
-            if len(text_ids) > 0:
-                doc_ids.append(text_ids)
-            if self.args.append_eod:
-                doc_ids[-1].append(Encoder.tokenizer.eod)
+            
+            # Filter out None values and ensure we have valid tokens
+            if text_ids:
+                text_ids = [t for t in text_ids if t is not None]
+                
+                if len(text_ids) > 0:
+                    # Split into chunks of max_seq_length
+                    for i in range(0, len(text_ids), max_seq_length):
+                        chunk = text_ids[i:i + max_seq_length]
+                        
+                        # Leave room for EOD token if needed
+                        if self.args.append_eod and hasattr(Encoder.tokenizer, 'eod'):
+                            chunk = chunk[:max_seq_length - 1]
+                            chunk.append(Encoder.tokenizer.eod)
+                        
+                        # Optionally pad to max_seq_length
+                        if self.args.pad_to_max_seq_length:
+                            pad_id = Encoder.tokenizer.pad_id
+                            chunk.extend([pad_id] * (max_seq_length - len(chunk)))
+                        
+                        doc_ids.append(chunk)
+                        
             ids[key] = doc_ids
         return ids, len(text)
 
@@ -84,6 +104,17 @@ def get_args(input_args=None):
         default=None,
         help="Optional: Number of documents in the input data (if known) for an accurate progress bar.",
         type=int,
+    )
+    group.add_argument(
+        "--max-seq-length",
+        type=int,
+        default=8192,
+        help="Maximum sequence length. Longer documents will be split into multiple sequences.",
+    )
+    group.add_argument(
+        "--pad-to-max-seq-length",
+        action="store_true",
+        help="Pad the sequences to the maximum sequence length.",
     )
     group = parser.add_argument_group(title="tokenizer")
     group.add_argument(
