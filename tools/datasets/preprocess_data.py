@@ -72,8 +72,8 @@ class Encoder(object):
                             chunk = chunk[:max_seq_length - 1]
                             chunk.append(Encoder.tokenizer.eod)
                         
-                        # Optionally pad to max_seq_length
-                        if self.args.pad_to_max_seq_length:
+                        # Only pad if not doing sample packing
+                        if self.args.pad_to_max_seq_length and not self.args.sample_packing:
                             pad_id = Encoder.tokenizer.pad_id
                             chunk.extend([pad_id] * (max_seq_length - len(chunk)))
                         
@@ -115,6 +115,11 @@ def get_args(input_args=None):
         "--pad-to-max-seq-length",
         action="store_true",
         help="Pad the sequences to the maximum sequence length.",
+    )
+    group.add_argument(
+        "--sample-packing",
+        action="store_true",
+        help="Enable sample packing to maximize sequence utilization.",
     )
     group = parser.add_argument_group(title="tokenizer")
     group.add_argument(
@@ -201,6 +206,48 @@ def yield_from_files(fnames: list, semaphore):
         yield from yielder(fname, semaphore)
 
 
+def pack_sequences(sequences, max_seq_length, pad_id, window_size=10):
+    """Pack sequences together to maximize utilization.
+    
+    Args:
+        sequences: List of token sequences
+        max_seq_length: Maximum allowed sequence length
+        pad_id: Token ID to use for padding
+        window_size: How far to look ahead for potential matches
+    
+    Returns:
+        List of packed sequences, each of length max_seq_length
+    """
+    packed_sequences = []
+    used = set()
+    
+    for i in range(len(sequences)):
+        if i in used:
+            continue
+            
+        current_seq = sequences[i]
+        used.add(i)
+        
+        # Look ahead up to window_size sequences
+        for j in range(i + 1, min(i + window_size + 1, len(sequences))):
+            if j in used:
+                continue
+                
+            next_seq = sequences[j]
+            # Check if we can fit the next sequence
+            if len(current_seq) + len(next_seq) <= max_seq_length:
+                current_seq.extend(next_seq)
+                used.add(j)
+            else:
+                break
+                
+        # Pad to max_seq_length
+        current_seq.extend([pad_id] * (max_seq_length - len(current_seq)))
+        packed_sequences.append(current_seq)
+        
+    return packed_sequences
+
+
 def main(input_args=None):
     args = get_args(input_args)
     encoder = Encoder(args)
@@ -244,18 +291,37 @@ def main(input_args=None):
     proc_start = time.time()
     total_bytes_processed = 0
     pbar = tqdm.tqdm()
+    
+    # Buffer for sample packing
+    sequence_buffer = {key: [] for key in args.jsonl_keys}
+    buffer_docs = 0
+    PACK_INTERVAL = 100  # Pack sequences every N documents
+    
     for i, (doc, bytes_processed) in enumerate(encoded_docs, start=1):
         total_bytes_processed += bytes_processed
-
-        # release semaphore so `yield_from_files` can add another file to the buffer
         semaphore.release()
 
-        # add each tokenized document / sentence
         for key, sentences in doc.items():
-            for sentence in sentences:
-                builders[key].add_item(np.array(sentence, dtype=builders[key].dtype))
-            # separate with eos token
-            builders[key].end_document()
+            if args.sample_packing:
+                sequence_buffer[key].extend(sentences)
+                buffer_docs += 1
+                
+                # Pack and flush buffer periodically
+                if buffer_docs >= PACK_INTERVAL:
+                    packed_seqs = pack_sequences(
+                        sequence_buffer[key],
+                        args.max_seq_length,
+                        tokenizer.pad_id
+                    )
+                    for seq in packed_seqs:
+                        builders[key].add_item(np.array(seq, dtype=builders[key].dtype))
+                    builders[key].end_document()
+                    sequence_buffer[key] = []
+                    buffer_docs = 0
+            else:
+                for sentence in sentences:
+                    builders[key].add_item(np.array(sentence, dtype=builders[key].dtype))
+                builders[key].end_document()
 
         # log progress
         if i % args.log_interval == 0:
@@ -267,6 +333,19 @@ def main(input_args=None):
             )
             if i != 0:
                 pbar.update(args.log_interval)
+
+    # Handle remaining sequences in buffer
+    if args.sample_packing:
+        for key in args.jsonl_keys:
+            if sequence_buffer[key]:
+                packed_seqs = pack_sequences(
+                    sequence_buffer[key],
+                    args.max_seq_length,
+                    tokenizer.pad_id
+                )
+                for seq in packed_seqs:
+                    builders[key].add_item(np.array(seq, dtype=builders[key].dtype))
+                builders[key].end_document()
 
     # save output file
     for key in args.jsonl_keys:
