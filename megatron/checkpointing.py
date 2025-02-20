@@ -29,7 +29,7 @@ import numpy as np
 
 try:
     import boto3
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     print(
         "For s3 checkpointing, please install boto3 either using requirements/requirements-s3.txt or https://github.com/boto/boto3"
     )

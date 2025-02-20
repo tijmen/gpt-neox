@@ -622,7 +622,7 @@ def main():
     )
     parser.add_argument(
         "--model_size",
-        choices=["7B", "mistral-7B-v0.1", "13B", "30B", "34B", "65B", "tokenizer_only"],
+        choices=["7B", "mistral-7B-v0.1", "13B", "30B", "34B", "65B", "70B", "tokenizer_only"],
     )
     parser.add_argument(
         "--output_dir",
